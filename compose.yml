@@ -3,17 +3,17 @@ version: '3.9'
 services:
   mysql_db:
     image: mysql:8.3
-    container_name: mysql_db
+    container_name: language_learner_mysql_db
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: pychecker
+      MYSQL_DATABASE: language_learner_db
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports:
       - '3307:3306'
     networks:
-      - app-network
+      - language-learner-network
     healthcheck:
       test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u ${MYSQL_USER} -p${MYSQL_PASSWORD} -e 'SELECT 1;'"]
       interval: 5s
@@ -28,7 +28,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: next_web
+    container_name: language_learner_web
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -41,7 +41,7 @@ services:
         "uvicorn",
         "app.main:app",
         "--host",
-        "0.0.0.0",
+        "127.0.0.1",
         "--port",
         "8001",
         "--reload",
@@ -49,21 +49,21 @@ services:
         "/app/app",
       ]
     depends_on:
-      mysql_db:
+      language_learner_mysql_db:
         condition: service_healthy
-    # env_file:
-    #   - .env
+    env_file:
+      - .env
     environment:
-      MYSQL_HOST: mysql_db
+      MYSQL_HOST: language_learner_mysql_db
       MYSQL_PORT: 3306
       HF_TOKEN: ${HF_TOKEN}
     networks:
-      - app-network
+      - language-learner-network
     volumes:
       - .:/app
 
 networks:
-  app-network:
+  language-learner-network:
 
 volumes:
   mysql_data:

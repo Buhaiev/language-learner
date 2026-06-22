@@ -68,8 +68,31 @@ async def add_dictionary_entry(request: Request):
 
     return WordTranslationResponse(word=dictionary_word, translation=dictionary_meaning)
 
+class WordTranslationResponse(BaseModel):
+    word: str
+    translation: str
 
-@router.get("/words", response_model=WordTranslationResponse)
+
+@router.get("/words", response_model=list[WordTranslationResponse])
+def list_dictionary_entries():
+    try:
+        initialize_dictionary_database()
+        with get_database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT german_word, english_translation FROM dictionary_entries ORDER BY id DESC"
+                )
+                rows = cursor.fetchall()
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return [
+        WordTranslationResponse(word=row[0], translation=row[1])
+        for row in rows
+    ]
+
+
+@router.get("/words/{word}", response_model=WordTranslationResponse)
 def retrieve_dictionary_entry(word: str):
     try:
         initialize_dictionary_database()
