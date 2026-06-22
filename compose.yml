@@ -1,0 +1,70 @@
+version: '3.9'
+
+services:
+  mysql_db:
+    image: mysql:8.3
+    container_name: mysql_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: pychecker
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - '3307:3306'
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u ${MYSQL_USER} -p${MYSQL_PASSWORD} -e 'SELECT 1;'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 700s
+      start_interval: 10s
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: next_web
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    ports:
+      - '8001:8001'
+    command:
+      [
+        "python",
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+        "--reload",
+        "--reload-dir",
+        "/app/app",
+      ]
+    depends_on:
+      mysql_db:
+        condition: service_healthy
+    # env_file:
+    #   - .env
+    environment:
+      MYSQL_HOST: mysql_db
+      MYSQL_PORT: 3306
+      HF_TOKEN: ${HF_TOKEN}
+    networks:
+      - app-network
+    volumes:
+      - .:/app
+
+networks:
+  app-network:
+
+volumes:
+  mysql_data:
+    driver: local

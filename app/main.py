@@ -10,9 +10,14 @@ from pydantic import BaseModel
 from html import escape
 
 app = FastAPI()
-ai_client = OpenAI(
-    base_url="https://router.huggingface.co/v1",
-    api_key=os.environ["HF_TOKEN"],
+hf_token = os.getenv("HF_TOKEN")
+ai_client = (
+    OpenAI(
+        base_url="https://router.huggingface.co/v1",
+        api_key=hf_token,
+    )
+    if hf_token
+    else None
 )
 
 DB_CONFIG = {
@@ -47,6 +52,10 @@ class TranslationResponse(BaseModel):
     concise_translation: str
 
 
+class DatabaseUnavailableError(RuntimeError):
+    pass
+
+
 def get_database_connection():
     mysql_connector = importlib.import_module("mysql.connector")
     return mysql_connector.connect(**DB_CONFIG)
@@ -54,12 +63,18 @@ def get_database_connection():
 
 def ensure_dictionary_database_exists():
     mysql_connector = importlib.import_module("mysql.connector")
-    connection = mysql_connector.connect(
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"],
-    )
+    try:
+        connection = mysql_connector.connect(
+            host=DB_CONFIG["host"],
+            port=DB_CONFIG["port"],
+            user=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+        )
+    except Exception as exc:
+        raise DatabaseUnavailableError(
+            f"MySQL is unavailable at {DB_CONFIG['host']}:{DB_CONFIG['port']}. "
+            "Check the database container, host, and port settings."
+        ) from exc
     try:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -71,34 +86,50 @@ def ensure_dictionary_database_exists():
 
 def initialize_dictionary_database():
     ensure_dictionary_database_exists()
-    with get_database_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS dictionary_entries (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    german_word VARCHAR(255) NOT NULL,
-                    english_translation VARCHAR(255) NOT NULL
+    try:
+        with get_database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dictionary_entries (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        german_word VARCHAR(255) NOT NULL,
+                        english_translation VARCHAR(255) NOT NULL
+                    )
+                    """
                 )
-                """
-            )
-            cursor.execute("SELECT COUNT(*) FROM dictionary_entries")
-            existing_count = cursor.fetchone()[0]
-            if existing_count == 0:
-                seed_entries = random.sample(SEED_DICTIONARY_ENTRIES, 10)
-                cursor.executemany(
-                    "INSERT INTO dictionary_entries (german_word, english_translation) VALUES (%s, %s)",
-                    seed_entries,
-                )
-        connection.commit()
+                cursor.execute("SELECT COUNT(*) FROM dictionary_entries")
+                existing_count = cursor.fetchone()[0]
+                if existing_count == 0:
+                    seed_entries = random.sample(SEED_DICTIONARY_ENTRIES, 10)
+                    cursor.executemany(
+                        "INSERT INTO dictionary_entries (german_word, english_translation) VALUES (%s, %s)",
+                        seed_entries,
+                    )
+            connection.commit()
+    except DatabaseUnavailableError:
+        raise
+    except Exception as exc:
+        raise DatabaseUnavailableError(
+            f"MySQL is unavailable at {DB_CONFIG['host']}:{DB_CONFIG['port']}. "
+            "Check the database container, host, and port settings."
+        ) from exc
 
 
 def get_learn_practice_data(exclude_german_word: str = ""):
     initialize_dictionary_database()
-    with get_database_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT german_word, english_translation FROM dictionary_entries")
-            entries = cursor.fetchall()
+    try:
+        with get_database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT german_word, english_translation FROM dictionary_entries")
+                entries = cursor.fetchall()
+    except DatabaseUnavailableError:
+        raise
+    except Exception as exc:
+        raise DatabaseUnavailableError(
+            f"MySQL is unavailable at {DB_CONFIG['host']}:{DB_CONFIG['port']}. "
+            "Check the database container, host, and port settings."
+        ) from exc
 
     if exclude_german_word:
         filtered_entries = [entry for entry in entries if entry[0] != exclude_german_word]
@@ -454,21 +485,23 @@ def render_learn_page(german_word: str, options: list[str], correct_answer: str,
         </html>
     """
 
-@app.get("/")   
-def read_root():
-    return {"message": "World"}
-
 
 @app.get("/translate", response_class=HTMLResponse)
 def translate_form():
-    initialize_dictionary_database()
-    return render_translate_page()
+    try:
+        initialize_dictionary_database()
+        return render_translate_page()
+    except DatabaseUnavailableError as exc:
+        return render_translate_page(status_message=str(exc))
 
 
 @app.get("/learn", response_class=HTMLResponse)
 def learn_page():
-        german_word, options, correct_answer = get_learn_practice_data()
-        return render_learn_page(german_word, options, correct_answer)
+        try:
+            german_word, options, correct_answer = get_learn_practice_data()
+            return render_learn_page(german_word, options, correct_answer)
+        except DatabaseUnavailableError as exc:
+            return render_learn_page("", [], "", str(exc))
 
 
 @app.post("/learn/answer", response_class=HTMLResponse)
@@ -498,14 +531,22 @@ def learn_answer(
 
 @app.post("/dictionary/add", response_class=HTMLResponse)
 def add_dictionary_entry(dictionary_word: str = Form(...), dictionary_meaning: str = Form(...), text: str = Form("")):
-        initialize_dictionary_database()
-        with get_database_connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO dictionary_entries (german_word, english_translation) VALUES (%s, %s)",
-                    (dictionary_word.strip(), dictionary_meaning.strip()),
-                )
-            connection.commit()
+        try:
+            initialize_dictionary_database()
+            with get_database_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "INSERT INTO dictionary_entries (german_word, english_translation) VALUES (%s, %s)",
+                        (dictionary_word.strip(), dictionary_meaning.strip()),
+                    )
+                connection.commit()
+        except DatabaseUnavailableError as exc:
+            return render_translate_page(
+                text=text or dictionary_word,
+                translated_text=dictionary_meaning,
+                concise_translation=dictionary_meaning,
+                status_message=str(exc),
+            )
 
         return render_translate_page(
             text=text or dictionary_word,
@@ -517,7 +558,17 @@ def add_dictionary_entry(dictionary_word: str = Form(...), dictionary_meaning: s
 
 @app.post("/translate", response_class=HTMLResponse)
 def translate_text(text: str = Form(...)):
-    initialize_dictionary_database()
+    try:
+        initialize_dictionary_database()
+    except DatabaseUnavailableError as exc:
+        return render_translate_page(text=text, status_message=str(exc))
+
+    if ai_client is None:
+        return render_translate_page(
+            text=text,
+            status_message="Missing HF_TOKEN environment variable. Set it to enable AI translation.",
+        )
+
     completion = ai_client.chat.completions.create(
         model="moonshotai/Kimi-K2-Instruct-0905",
         messages=[
@@ -540,14 +591,6 @@ def translate_text(text: str = Form(...)):
         translated_text=translation.detailed_translation,
         concise_translation=translation.concise_translation,
     )
-
-@app.get("/items")
-def read_items():
-        return {"items": ["item1", "item2", "item3"]}
-
-@app.get("/items/{item_id}")
-def read_item(item_id: str):
-    return {"item_id": item_id}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8001, reload=True)
